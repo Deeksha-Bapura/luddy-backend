@@ -26,6 +26,12 @@ app.use((req, res, next) => {
 let submissions = [];
 let performanceLogs = [];
 
+const judges = [
+  { username: "judge1", password: "pass123" },
+  { username: "judge2", password: "pass123" },
+  { username: "judge3", password: "pass123" }
+];
+
 // Home route
 app.get("/", (req, res) => {
   res.send("Luddy Hackathon Leaderboard API is running");
@@ -56,10 +62,13 @@ app.post("/add", (req, res) => {
 
   submissions.push(newSubmission);
 
-  res.status(201).json({
-    message: "Submission added successfully",
-    submission: newSubmission
-  });
+  return res.status(201).json({
+  success: true,
+  message: "Score submitted successfully",
+  teamName,
+  totalScore,
+  timestamp: newSubmission.timestamp
+});
 });
 
 // Temporary route to view all submissions
@@ -67,34 +76,56 @@ app.get("/submissions", (req, res) => {
   res.json(submissions);
 });
 // Leaderboard route
+// Leaderboard route
 app.get("/leaderboard", (req, res) => {
-  // Step 1: group scores by team
-  const teamScores = {};
+  if (submissions.length === 0) {
+    return res.json([]);
+  }
+
+  const teamMap = {};
 
   submissions.forEach((entry) => {
-    if (!teamScores[entry.teamName]) {
-      teamScores[entry.teamName] = [];
+    const team = entry.teamName.trim();
+
+    if (!teamMap[team]) {
+      teamMap[team] = {
+        teamName: team,
+        totalScore: 0,
+        submissionCount: 0,
+        judges: new Set()
+      };
     }
-    teamScores[entry.teamName].push(entry.totalScore);
+
+    teamMap[team].totalScore += entry.totalScore;
+    teamMap[team].submissionCount += 1;
+    teamMap[team].judges.add(entry.judgeId);
   });
 
-  // Step 2: calculate average score for each team
-  const leaderboard = Object.keys(teamScores).map((team) => {
-    const scores = teamScores[team];
-    const avg =
-      scores.reduce((sum, val) => sum + val, 0) / scores.length;
+  const leaderboard = Object.values(teamMap).map((team) => {
+    const averageScore = team.totalScore / team.submissionCount;
 
     return {
-      teamName: team,
-      averageScore: avg
+      teamName: team.teamName,
+      totalScore: team.totalScore,
+      averageScore: Number(averageScore.toFixed(2)),
+      submissionCount: team.submissionCount,
+      status: team.submissionCount >= 3 ? "Complete" : "Pending"
     };
   });
 
-  // Step 3: sort descending
-  leaderboard.sort((a, b) => b.averageScore - a.averageScore);
+  leaderboard.sort((a, b) => {
+    if (b.totalScore !== a.totalScore) {
+      return b.totalScore - a.totalScore;
+    }
+    return b.averageScore - a.averageScore;
+  });
 
-  // Step 4: return top 10
-  res.json(leaderboard.slice(0, 10));
+  const rankedLeaderboard = leaderboard.map((team, index) => ({
+    rank: index + 1,
+    ...team
+  }));
+
+  res.json(rankedLeaderboard.slice(0, 10));
 });
 // Remove all submissions for a team
 app.delete("/remove/:teamName", (req, res) => {
@@ -199,37 +230,159 @@ app.get("/performance", (req, res) => {
 });
 // History route
 app.get("/history", (req, res) => {
-  const { judgeId, teamName, startDate, endDate } = req.query;
+  const { limit } = req.query;
 
-  let filteredHistory = [...submissions];
+  let sorted = [...submissions].sort(
+    (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
+  );
 
-  if (judgeId) {
-    filteredHistory = filteredHistory.filter(
-      (entry) => entry.judgeId.toLowerCase() === judgeId.toLowerCase()
-    );
-  }
-
-  if (teamName) {
-    filteredHistory = filteredHistory.filter(
-      (entry) => entry.teamName.toLowerCase() === teamName.toLowerCase()
-    );
-  }
-
-  if (startDate) {
-    filteredHistory = filteredHistory.filter(
-      (entry) => new Date(entry.timestamp) >= new Date(startDate)
-    );
-  }
-
-  if (endDate) {
-    filteredHistory = filteredHistory.filter(
-      (entry) => new Date(entry.timestamp) <= new Date(endDate)
-    );
+  if (limit) {
+    sorted = sorted.slice(0, Number(limit));
   }
 
   res.json({
-    totalRecords: filteredHistory.length,
-    history: filteredHistory
+    totalRecords: sorted.length,
+    history: sorted
+  });
+});
+// Judge login route
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({
+      message: "Username and password are required"
+    });
+  }
+
+  const judge = judges.find(
+    (j) => j.username === username && j.password === password
+  );
+
+  if (!judge) {
+    return res.status(401).json({
+      message: "Invalid credentials"
+    });
+  }
+
+  res.json({
+    message: "Login successful",
+    role: "judge",
+    username: judge.username
+  });
+});
+// Dashboard route
+app.get("/dashboard", (req, res) => {
+  if (submissions.length === 0) {
+    return res.json({
+      summary: {
+        totalTeams: 0,
+        totalJudges: 0,
+        lastUpdated: null
+      },
+      topThree: [],
+      recentUpdates: [],
+      stats: {
+        mean: 0,
+        median: 0,
+        standardDeviation: 0
+      },
+      tableData: []
+    });
+  }
+
+  // ---------- Summary ----------
+  const uniqueTeams = new Set(submissions.map((entry) => entry.teamName.trim()));
+  const uniqueJudges = new Set(submissions.map((entry) => entry.judgeId.trim()));
+
+  const sortedByTime = [...submissions].sort(
+    (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
+  );
+
+  const lastUpdated = sortedByTime[0]?.timestamp || null;
+
+  // ---------- Team Aggregation ----------
+  const teamMap = {};
+
+  submissions.forEach((entry) => {
+    const team = entry.teamName.trim();
+
+    if (!teamMap[team]) {
+      teamMap[team] = {
+        teamName: team,
+        totalScore: 0,
+        submissionCount: 0
+      };
+    }
+
+    teamMap[team].totalScore += entry.totalScore;
+    teamMap[team].submissionCount += 1;
+  });
+
+  let tableData = Object.values(teamMap).map((team) => {
+    const averageScore = team.totalScore / team.submissionCount;
+
+    return {
+      teamName: team.teamName,
+      totalScore: team.totalScore,
+      averageScore: Number(averageScore.toFixed(2)),
+      submissionCount: team.submissionCount,
+      status: team.submissionCount >= 3 ? "Complete" : "Pending"
+    };
+  });
+
+  tableData.sort((a, b) => {
+    if (b.totalScore !== a.totalScore) {
+      return b.totalScore - a.totalScore;
+    }
+    return b.averageScore - a.averageScore;
+  });
+
+  tableData = tableData.map((team, index) => ({
+    rank: index + 1,
+    ...team
+  }));
+
+  const topThree = tableData.slice(0, 3);
+
+  // ---------- Recent Updates ----------
+  const recentUpdates = sortedByTime.slice(0, 5).map((entry) => ({
+    judgeId: entry.judgeId,
+    teamName: entry.teamName,
+    totalScore: entry.totalScore,
+    timestamp: entry.timestamp
+  }));
+
+  // ---------- Stats ----------
+  const teamTotals = tableData.map((team) => team.totalScore).sort((a, b) => a - b);
+  const n = teamTotals.length;
+
+  const mean = teamTotals.reduce((sum, score) => sum + score, 0) / n;
+
+  const median =
+    n % 2 === 0
+      ? (teamTotals[n / 2 - 1] + teamTotals[n / 2]) / 2
+      : teamTotals[Math.floor(n / 2)];
+
+  const variance =
+    teamTotals.reduce((sum, score) => sum + Math.pow(score - mean, 2), 0) / n;
+
+  const standardDeviation = Math.sqrt(variance);
+
+  res.json({
+    summary: {
+      totalTeams: uniqueTeams.size,
+      totalJudges: uniqueJudges.size,
+      lastUpdated
+    },
+    topThree,
+    recentUpdates,
+    stats: {
+      mean: Number(mean.toFixed(2)),
+      median: Number(median.toFixed(2)),
+      standardDeviation: Number(standardDeviation.toFixed(2))
+    },
+    tableData
   });
 });
 app.listen(PORT, () => {
